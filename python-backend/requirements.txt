@@ -2,3 +2,8 @@ openai-agents
 pydantic
 fastapi
 uvicorn
+openai
+tiktoken
+pypdf
+faiss-cpu
+numpy

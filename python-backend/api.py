@@ -5,6 +5,9 @@ from typing import Optional, List, Dict, Any
 from uuid import uuid4
 import time
 import logging
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv()  # Carrega variáveis de ambiente do arquivo .env
 
 from main import (
     triage_agent,
