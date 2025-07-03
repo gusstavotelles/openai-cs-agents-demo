@@ -142,10 +142,11 @@ guardrail_agent = Agent(
 async def relevance_guardrail(
     context: RunContextWrapper[None], agent: Agent, input: str | list[TResponseInputItem]
 ) -> GuardrailFunctionOutput:
-    """Guardrail to check if input is relevant to airline topics."""
-    result = await Runner.run(guardrail_agent, input, context=context.context)
-    final = result.final_output_as(RelevanceOutput)
-    return GuardrailFunctionOutput(output_info=final, tripwire_triggered=not final.is_relevant)
+    """Relevance guardrail disabled: always allow."""
+    return GuardrailFunctionOutput(
+        output_info=RelevanceOutput(reasoning="disabled", is_relevant=True),
+        tripwire_triggered=False,
+    )
 
 class JailbreakOutput(BaseModel):
     """Schema for jailbreak guardrail decisions."""
