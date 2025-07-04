@@ -15,6 +15,7 @@ from agents import (
     input_guardrail,
 )
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
+import rag_store
 
 # =========================
 # CONTEXT
@@ -107,6 +108,53 @@ async def display_seat_map(
     return "DISPLAY_SEAT_MAP"
 
 # =========================
+# RAG TOOL & PORTFOLIO AGENT
+# =========================
+
+@function_tool(
+    name_override="query_rag_tool",
+    description_override="Search the Retrieval-Augmented Generation (RAG) store for relevant information."
+)
+async def query_rag_tool(query: str) -> str:
+    """
+    Search documents in the RAG store for passages relevant to the query.
+    If nothing is found, returns the sentinel string 'NO_RAG_MATCH'.
+    """
+    results = rag_store.query_rag(query, k=3)
+    if not results:
+        return "Nenhuma informação relevante encontrada no RAG."
+    # Retorna o chunk mais relevante (score mais alto)
+    top = results[0]
+    return f"RAG: {top['chunk']}"
+
+def portfolio_agent_instructions(
+    run_context: RunContextWrapper[AirlineAgentContext], agent: Agent[AirlineAgentContext]
+) -> str:
+    return (
+        f"{RECOMMENDED_PROMPT_PREFIX}\\n"
+        "Você é o Portfolio Agent. Sempre consulte primeiro o query_rag_tool com a pergunta do usuário.\\n"
+        "Se retornar 'NO_RAG_MATCH', então use seu modelo para responder.\\n"
+        "Se a pergunta não se relacionar ao portfólio/empresa, devolva para o Triage Agent."
+    )
+
+# Forward declaration to avoid NameError – real implementation is defined later
+async def jailbreak_guardrail(
+    context: RunContextWrapper[None],
+    agent: Agent,
+    input: str | list[TResponseInputItem],
+) -> GuardrailFunctionOutput:  # type: ignore[override]
+    return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+portfolio_agent = Agent[AirlineAgentContext](
+    name="Portfolio Agent",
+    model="gpt-4.1",
+    handoff_description="Agente que prioriza respostas baseadas no RAG antes de usar o LLM.",
+    instructions=portfolio_agent_instructions,
+    tools=[query_rag_tool],
+    input_guardrails=[jailbreak_guardrail],
+)
+
+# =========================
 # HOOKS
 # =========================
 
@@ -119,34 +167,6 @@ async def on_seat_booking_handoff(context: RunContextWrapper[AirlineAgentContext
 # GUARDRAILS
 # =========================
 
-class RelevanceOutput(BaseModel):
-    """Schema for relevance guardrail decisions."""
-    reasoning: str
-    is_relevant: bool
-
-guardrail_agent = Agent(
-    model="gpt-4.1-mini",
-    name="Relevance Guardrail",
-    instructions=(
-        "Determine if the user's message is highly unrelated to a normal customer service "
-        "conversation with an airline (flights, bookings, baggage, check-in, flight status, policies, loyalty programs, etc.). "
-        "Important: You are ONLY evaluating the most recent user message, not any of the previous messages from the chat history"
-        "It is OK for the customer to send messages such as 'Hi' or 'OK' or any other messages that are at all conversational, "
-        "but if the response is non-conversational, it must be somewhat related to airline travel. "
-        "Return is_relevant=True if it is, else False, plus a brief reasoning."
-    ),
-    output_type=RelevanceOutput,
-)
-
-@input_guardrail(name="Relevance Guardrail")
-async def relevance_guardrail(
-    context: RunContextWrapper[None], agent: Agent, input: str | list[TResponseInputItem]
-) -> GuardrailFunctionOutput:
-    """Relevance guardrail disabled: always allow."""
-    return GuardrailFunctionOutput(
-        output_info=RelevanceOutput(reasoning="disabled", is_relevant=True),
-        tripwire_triggered=False,
-    )
 
 class JailbreakOutput(BaseModel):
     """Schema for jailbreak guardrail decisions."""
@@ -204,7 +224,7 @@ seat_booking_agent = Agent[AirlineAgentContext](
     handoff_description="A helpful agent that can update a seat on a flight.",
     instructions=seat_booking_instructions,
     tools=[update_seat, display_seat_map],
-    input_guardrails=[relevance_guardrail, jailbreak_guardrail],
+    input_guardrails=[jailbreak_guardrail],
 )
 
 def flight_status_instructions(
@@ -228,7 +248,7 @@ flight_status_agent = Agent[AirlineAgentContext](
     handoff_description="An agent to provide flight status information.",
     instructions=flight_status_instructions,
     tools=[flight_status_tool],
-    input_guardrails=[relevance_guardrail, jailbreak_guardrail],
+    input_guardrails=[jailbreak_guardrail],
 )
 
 # Cancellation tool and agent
@@ -276,7 +296,7 @@ cancellation_agent = Agent[AirlineAgentContext](
     handoff_description="An agent to cancel flights.",
     instructions=cancellation_instructions,
     tools=[cancel_flight],
-    input_guardrails=[relevance_guardrail, jailbreak_guardrail],
+    input_guardrails=[jailbreak_guardrail],
 )
 
 faq_agent = Agent[AirlineAgentContext](
@@ -290,7 +310,7 @@ faq_agent = Agent[AirlineAgentContext](
     2. Use the faq lookup tool to get the answer. Do not rely on your own knowledge.
     3. Respond to the customer with the answer""",
     tools=[faq_lookup_tool],
-    input_guardrails=[relevance_guardrail, jailbreak_guardrail],
+    input_guardrails=[jailbreak_guardrail],
 )
 
 triage_agent = Agent[AirlineAgentContext](
@@ -302,17 +322,19 @@ triage_agent = Agent[AirlineAgentContext](
         "You are a helpful triaging agent. You can use your tools to delegate questions to other appropriate agents."
     ),
     handoffs=[
+        portfolio_agent,
         flight_status_agent,
         handoff(agent=cancellation_agent, on_handoff=on_cancellation_handoff),
         faq_agent,
         handoff(agent=seat_booking_agent, on_handoff=on_seat_booking_handoff),
     ],
-    input_guardrails=[relevance_guardrail, jailbreak_guardrail],
+    input_guardrails=[jailbreak_guardrail],
 )
 
 # Set up handoff relationships
 faq_agent.handoffs.append(triage_agent)
 seat_booking_agent.handoffs.append(triage_agent)
 flight_status_agent.handoffs.append(triage_agent)
+portfolio_agent.handoffs.append(triage_agent)
 # Add cancellation agent handoff back to triage
 cancellation_agent.handoffs.append(triage_agent)

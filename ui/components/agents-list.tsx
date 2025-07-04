@@ -45,6 +45,12 @@ export function AgentsList({ agents, currentAgent }: AgentsListProps) {
                   Active
                 </Badge>
               )}
+              {/* Indicador de Portfolio/RAG */}
+              {agent.name === "Portfolio Agent" && (
+                <Badge className="mt-2 bg-green-600 hover:bg-green-700 text-white">
+                  RAG
+                </Badge>
+              )}
             </CardContent>
           </Card>
         ))}
