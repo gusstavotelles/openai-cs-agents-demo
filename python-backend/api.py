@@ -159,6 +159,92 @@ def _build_agents_list() -> List[Dict[str, Any]]:
 # Endpoints
 # =========================
 
+from fastapi import Request
+from typing import Literal
+
+# OpenAI-compatible models endpoint
+@app.get("/v1/models")
+async def list_models():
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "sig9-agent-0.1",
+                "object": "model",
+                "created": 0,
+                "owned_by": "sig9",
+            }
+        ]
+    }
+
+# OpenAI-compatible chat completions endpoint
+class OpenAIMessage(BaseModel):
+    role: Literal["user", "assistant", "system"]
+    content: str
+
+class OpenAIChatRequest(BaseModel):
+    model: str
+    messages: list[OpenAIMessage]
+    stream: Optional[bool] = False
+
+class OpenAIChatChoice(BaseModel):
+    index: int
+    message: OpenAIMessage
+    finish_reason: str = "stop"
+
+class OpenAIChatResponse(BaseModel):
+    id: str
+    object: str = "chat.completion"
+    created: int
+    model: str
+    choices: list[OpenAIChatChoice]
+
+@app.post("/v1/chat/completions", response_model=OpenAIChatResponse)
+async def openai_chat_completions(req: OpenAIChatRequest, request: Request):
+    """
+    OpenAI-compatible chat completions endpoint.
+    """
+    import uuid
+    import datetime as dt
+
+    # Extrai apenas as mensagens do usuário (última)
+    last_user_msg = next((m.content for m in reversed(req.messages) if m.role == "user"), "")
+    # Chama a lógica do agente principal (triage)
+    # Aqui, para simplificar, criamos uma nova conversa a cada request
+    ctx = create_initial_context()
+    state = {
+        "input_items": [],
+        "context": ctx,
+        "current_agent": triage_agent.name,
+    }
+    state["input_items"].append({"content": last_user_msg, "role": "user"})
+    current_agent = triage_agent
+    result = await Runner.run(current_agent, state["input_items"], context=state["context"])
+    # Extrai a resposta do agente
+    reply = ""
+    for item in result.new_items:
+        if hasattr(item, "content"):
+            reply = getattr(item, "content")
+            break
+        elif hasattr(item, "output"):
+            reply = getattr(item, "output")
+            break
+    if not reply:
+        reply = "Desculpe, não consegui gerar uma resposta."
+
+    return OpenAIChatResponse(
+        id=f"cmpl-{uuid.uuid4().hex}",
+        created=int(dt.datetime.utcnow().timestamp()),
+        model=req.model,
+        choices=[
+            OpenAIChatChoice(
+                index=0,
+                message=OpenAIMessage(role="assistant", content=reply),
+                finish_reason="stop"
+            )
+        ]
+    )
+
 @app.post("/rag/upload")
 async def rag_upload(file: UploadFile = File(...)):
     try:
