@@ -203,47 +203,134 @@ class OpenAIChatResponse(BaseModel):
 async def openai_chat_completions(req: OpenAIChatRequest, request: Request):
     """
     OpenAI-compatible chat completions endpoint.
+    Agora delega internamente para o mesmo fluxo do /chat, garantindo lógica idêntica à UI React.
     """
     import uuid
-    import datetime as dt
+    import datetime
+    import json
 
-    # Extrai apenas as mensagens do usuário (última)
-    last_user_msg = next((m.content for m in reversed(req.messages) if m.role == "user"), "")
-    # Chama a lógica do agente principal (triage)
-    # Aqui, para simplificar, criamos uma nova conversa a cada request
-    ctx = create_initial_context()
-    state = {
-        "input_items": [],
-        "context": ctx,
-        "current_agent": triage_agent.name,
-    }
-    state["input_items"].append({"content": last_user_msg, "role": "user"})
-    current_agent = triage_agent
-    result = await Runner.run(current_agent, state["input_items"], context=state["context"])
-    # Extrai a resposta do agente
-    reply = ""
-    for item in result.new_items:
-        if hasattr(item, "content"):
-            reply = getattr(item, "content")
-            break
-        elif hasattr(item, "output"):
-            reply = getattr(item, "output")
-            break
-    if not reply:
-        reply = "Desculpe, não consegui gerar uma resposta."
+    # Loga o payload recebido
+    try:
+        payload = request._json if hasattr(request, "_json") else req.dict()
+        print("[DEBUG] Payload recebido em /v1/chat/completions:")
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print(f"[DEBUG] Falha ao logar payload: {e}")
 
-    return OpenAIChatResponse(
-        id=f"cmpl-{uuid.uuid4().hex}",
-        created=int(dt.datetime.utcnow().timestamp()),
-        model=req.model,
-        choices=[
-            OpenAIChatChoice(
-                index=0,
-                message=OpenAIMessage(role="assistant", content=reply),
-                finish_reason="stop"
+    # Validação básica do payload
+    if not hasattr(req, "messages") or not isinstance(req.messages, list):
+        print("[ERROR] Payload inválido: campo 'messages' ausente ou mal formatado.")
+        return OpenAIChatResponse(
+            id=f"cmpl-{uuid.uuid4().hex}",
+            created=int(datetime.datetime.utcnow().timestamp()),
+            model=getattr(req, "model", "sig9-agent-0.1"),
+            choices=[
+                OpenAIChatChoice(
+                    index=0,
+                    message=OpenAIMessage(role="assistant", content="Erro: payload inválido, campo 'messages' ausente."),
+                    finish_reason="stop"
+                )
+            ]
+        )
+
+    # Tenta obter conversation_id do header ou body (OpenAI API não define, mas pode ser custom)
+    conversation_id = request.headers.get("Conversation-Id") or getattr(req, "conversation_id", None)
+
+    # Filtra mensagens do tipo "assistant" que sejam fallback de erro
+    FALLBACK_RESPONSES = [
+        "Desculpe, não consegui gerar uma resposta.",
+        "Sorry, I can only answer questions related to airline travel."
+    ]
+    # Detecta se é um prompt de meta-função do OpenWebUI (ex: começa com "### Task:")
+    try:
+        if req.messages and req.messages[-1].role == "user" and isinstance(req.messages[-1].content, str) and req.messages[-1].content.strip().startswith("### Task:"):
+            prompt = req.messages[-1].content.strip()
+            print("[DEBUG] Prompt de meta-função detectado, respondendo customizado para compatibilidade OpenWebUI.")
+            # Follow-ups
+            if "Suggest 3-5 relevant follow-up questions" in prompt:
+                follow_ups = [
+                    "Você pode me explicar melhor?",
+                    "Quais são os próximos passos?",
+                    "Pode dar um exemplo?",
+                    "Como isso se aplica ao meu caso?",
+                    "Existe documentação sobre isso?"
+                ]
+                content = '{ "follow_ups": ' + str(follow_ups).replace("'", '"') + ' }'
+            # Title
+            elif "Generate a concise, 3-5 word title" in prompt:
+                content = '{ "title": "💬 Conversa com o agente" }'
+            # Tags
+            elif "Generate 1-3 broad tags" in prompt:
+                content = '{ "tags": ["General", "Atendimento", "Chatbot"] }'
+            else:
+                content = ""
+            return OpenAIChatResponse(
+                id=f"cmpl-{uuid.uuid4().hex}",
+                created=int(datetime.datetime.utcnow().timestamp()),
+                model=getattr(req, "model", "sig9-agent-0.1"),
+                choices=[
+                    OpenAIChatChoice(
+                        index=0,
+                        message=OpenAIMessage(role="assistant", content=content),
+                        finish_reason="stop"
+                    )
+                ]
             )
-        ]
-    )
+    except Exception as e:
+        print(f"[ERROR] Falha ao processar prompt de meta-função: {e}")
+        return OpenAIChatResponse(
+            id=f"cmpl-{uuid.uuid4().hex}",
+            created=int(datetime.datetime.utcnow().timestamp()),
+            model=getattr(req, "model", "sig9-agent-0.1"),
+            choices=[
+                OpenAIChatChoice(
+                    index=0,
+                    message=OpenAIMessage(role="assistant", content="Erro ao processar comando especial do OpenWebUI."),
+                    finish_reason="stop"
+                )
+            ]
+        )
+    # Robustez: filtra apenas mensagens válidas e ignora campos malformados
+    # Para simular exatamente o fluxo do /chat, use ChatRequest e chame chat_endpoint
+    try:
+        # Extrai a última mensagem do usuário (ignora comandos especiais)
+        user_msgs = [m for m in req.messages if hasattr(m, "role") and m.role == "user" and not (isinstance(m.content, str) and m.content.strip().startswith("### Task:"))]
+        last_user_msg = user_msgs[-1].content if user_msgs else ""
+        # Usa o mesmo fluxo do /chat
+        chat_req = ChatRequest(conversation_id=None, message=last_user_msg)
+        chat_resp = await chat_endpoint(chat_req)
+        # Extrai a resposta do agente (primeira mensagem do tipo "assistant")
+        reply = ""
+        if hasattr(chat_resp, "messages") and chat_resp.messages:
+            reply = chat_resp.messages[0].content
+        if not reply:
+            reply = "Desculpe, não consegui gerar uma resposta."
+        return OpenAIChatResponse(
+            id=f"cmpl-{uuid.uuid4().hex}",
+            created=int(datetime.datetime.utcnow().timestamp()),
+            model=getattr(req, "model", "sig9-agent-0.1"),
+            choices=[
+                OpenAIChatChoice(
+                    index=0,
+                    message=OpenAIMessage(role="assistant", content=reply),
+                    finish_reason="stop"
+                )
+            ]
+        )
+    except Exception as e:
+        print(f"[ERROR] Erro inesperado no endpoint /v1/chat/completions: {e}")
+        return OpenAIChatResponse(
+            id=f"cmpl-{uuid.uuid4().hex}",
+            created=int(datetime.datetime.utcnow().timestamp()),
+            model=getattr(req, "model", "sig9-agent-0.1"),
+            choices=[
+                OpenAIChatChoice(
+                    index=0,
+                    message=OpenAIMessage(role="assistant", content=f"Erro interno: {str(e)}"),
+                    finish_reason="stop"
+                )
+            ]
+        )
 
 @app.post("/rag/upload")
 async def rag_upload(file: UploadFile = File(...)):
