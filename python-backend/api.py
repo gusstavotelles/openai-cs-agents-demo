@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+import re
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from uuid import uuid4
@@ -110,6 +111,12 @@ conversation_store = InMemoryConversationStore()
 # =========================
 # Helpers
 # =========================
+
+def extract_mention(text: str) -> str | None:
+    match = re.search(r'@([a-zA-Z0-9_]+)', text)
+    if match:
+        return match.group(1)
+    return None
 
 def _get_agent_by_name(name: str):
     """Return the agent object by name."""
@@ -374,7 +381,28 @@ async def chat_endpoint(req: ChatRequest):
             conversation_id = req.conversation_id  # type: ignore
             state = conversation_store.get(conversation_id)
 
-        current_agent = _get_agent_by_name(state["current_agent"])
+        # --- INÍCIO: Lógica de menção de agente ---
+        mentioned = extract_mention(req.message)
+        if mentioned:
+            agent_names = [a["name"] for a in _build_agents_list()]
+            if mentioned in agent_names:
+                current_agent = _get_agent_by_name(mentioned)
+                state["current_agent"] = mentioned
+                logger.info(f"Menção detectada: @{mentioned} - roteando para agente correspondente.")
+            else:
+                logger.warning(f"Menção a agente inexistente: @{mentioned}")
+                return ChatResponse(
+                    conversation_id=conversation_id,
+                    current_agent=state["current_agent"],
+                    messages=[MessageResponse(content=f"Agente @{mentioned} não encontrado.", agent="system")],
+                    events=[],
+                    context=state["context"].model_dump(),
+                    agents=_build_agents_list(),
+                    guardrails=[],
+                )
+        else:
+            current_agent = _get_agent_by_name(state["current_agent"])
+        # --- FIM: Lógica de menção de agente ---
         state["input_items"].append({"content": req.message, "role": "user"})
         old_context = state["context"].model_dump().copy()
         guardrail_checks: List[GuardrailCheck] = []
